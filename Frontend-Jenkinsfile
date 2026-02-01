@@ -1,0 +1,104 @@
+pipeline {
+    agent any
+    
+    tools {
+        nodejs 'nodejs'
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+        APP_NAME        = "proshop-application"
+        IMAGE_TAG = "v${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/AdarshJain-dev/proshop-application.git'
+            }
+        }
+        stage('Build') {
+            steps {
+                sh 'npm install'
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=GCBank \
+                            -Dsonar.projectKey=GCBank
+                        '''
+                }
+            }
+        }
+        // stage('Quality Gate check') {
+        //     steps {
+        //         timeout(time: 5, unit: 'MINUTES') {
+        //             waitForQualityGate abortPipeline: false
+        //         }
+        //     }
+        // }
+        stage('Trivy FS Scan') {
+            steps {
+                sh 'trivy fs --format table -o fs-report.html .'
+            }
+        }
+        stage('Docker Image Build') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred') {
+                        sh 'docker build -t adarshjain428/proshopfrontend:$IMAGE_TAG frontend/'
+                    }
+                }
+            }
+        }
+        stage('Trivy Image Scan') {
+            steps {
+                sh 'trivy image --format table -o image-report.html adarshjain428/proshopfrontend:$IMAGE_TAG'
+            }
+        }
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred') {
+                        sh 'docker push adarshjain428/proshopfrontend:$IMAGE_TAG'
+                    }
+                }
+            }
+        }
+        stage('Frontend CD Manifest Update (GitOps)') {
+            steps {
+                script {
+                    cleanWs()
+        
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'git-cred',
+                            usernameVariable: 'GIT_USERNAME',
+                            passwordVariable: 'GIT_PASSWORD'
+                        )
+                    ]) {
+                        sh """
+                          git clone https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/AdarshJain-dev/proshop-application-Argo-CD.git
+                          cd proshop-application-Argo-CD/k8s-dev
+        
+                          echo "Updating frontend image to tag: ${IMAGE_TAG}"
+        
+                          sed -i 's|image: .*proshopfrontend:.*|image: adarshjain428/proshopfrontend:${IMAGE_TAG}|' frontend-ds.yaml
+        
+                          echo "Updated manifest:"
+                          cat frontend-ds.yaml
+        
+                          git config user.name "jenkins-ci"
+                          git config user.email "jenkins@company.com"
+        
+                          git add frontend-ds.yaml
+                          git commit -m "chore(frontend): update image to ${IMAGE_TAG}"
+                          git push origin main
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
